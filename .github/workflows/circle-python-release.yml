@@ -39,6 +39,11 @@ env:
   RELEASE_VERSION: ${{ inputs.version }}
   RUNTIME_DISTRIBUTION: circle-codex-cli-bin
   SDK_DISTRIBUTION: circle-codex
+  # Largest runtime wheel this workflow accepts, in MB. PyPI's default per-file
+  # limit is 100 MB, projects owned by a PyPI organization get 200 MB, and PyPI
+  # can raise a project's limit on request. Codex runtime wheels are ~150-200 MB,
+  # so keep this in line with the limit your PyPI project actually has.
+  MAX_WHEEL_MB: "200"
 
 jobs:
   validate:
@@ -190,6 +195,10 @@ jobs:
 
       - name: Install musl build tools
         if: ${{ runner.os == 'Linux' }}
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          APT_UPDATE_ARGS: -o Acquire::Retries=3
+          APT_INSTALL_ARGS: --no-install-recommends
         run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
 
       - name: Disable aws-lc jitter entropy (musl)
@@ -295,11 +304,12 @@ jobs:
       - name: Check wheel size and smoke-test the bundled binary
         run: |
           set -euo pipefail
-          # PyPI rejects files above 100 MB unless the project has a raised limit.
+          # PyPI rejects files above the project's per-file limit (see MAX_WHEEL_MB).
           for wheel in dist/runtime/*.whl; do
             size="$(wc -c < "$wheel")"
-            if (( size > 100 * 1024 * 1024 )); then
-              echo "${wheel} is ${size} bytes, above PyPI's 100 MB default limit."
+            echo "${wheel}: $(( size / 1024 / 1024 )) MB"
+            if (( size > MAX_WHEEL_MB * 1024 * 1024 )); then
+              echo "${wheel} is ${size} bytes, above the ${MAX_WHEEL_MB} MB limit set in MAX_WHEEL_MB."
               exit 1
             fi
           done

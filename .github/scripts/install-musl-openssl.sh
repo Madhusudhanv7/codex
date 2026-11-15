@@ -21,7 +21,7 @@ openssl_prefix="${openssl_root}/prefix"
 if [[ ! -f "${openssl_prefix}/.complete" ]]; then
   mkdir -p "${openssl_root}"
   archive="${openssl_root}/openssl-${openssl_version}.tar.gz"
-  curl -fsSL "https://github.com/openssl/openssl/releases/download/openssl-${openssl_version}/openssl-${openssl_version}.tar.gz" -o "${archive}"
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 "https://github.com/openssl/openssl/releases/download/openssl-${openssl_version}/openssl-${openssl_version}.tar.gz" -o "${archive}"
   echo "${openssl_sha256}  ${archive}" | sha256sum -c -
   tar -xzf "${archive}" -C "${openssl_root}"
 
