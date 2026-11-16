@@ -105,11 +105,20 @@ def ensure_runtime(manifest: Mapping[str, Any]) -> Path:
 
 
 def _ssl_context() -> ssl.SSLContext:
+    # Trust the system certificate store (where company proxies add their own
+    # certificate; SSL_CERT_FILE is honored here too), a bundle named by
+    # REQUESTS_CA_BUNDLE, and certifi's bundle for Python installs that ship
+    # without system certificates.
+    context = ssl.create_default_context()
+    bundle = os.environ.get("REQUESTS_CA_BUNDLE")
+    if bundle and Path(bundle).is_file():
+        context.load_verify_locations(cafile=bundle)
     try:
         import certifi
     except ImportError:
-        return ssl.create_default_context()
-    return ssl.create_default_context(cafile=certifi.where())
+        return context
+    context.load_verify_locations(cafile=certifi.where())
+    return context
 
 
 def _download(url: str, destination: Path, *, expected_sha256: str, size: int | None) -> None:

@@ -16,7 +16,12 @@ def main() -> int:
     parser.add_argument("dist_dir", type=Path)
     args = parser.parse_args()
 
-    expected = {path.name for path in args.dist_dir.iterdir() if path.is_file()}
+    # Only package files: the upload step also leaves *.publish.attestation files here.
+    expected = {
+        path.name
+        for path in args.dist_dir.iterdir()
+        if path.is_file() and path.name.endswith((".whl", ".tar.gz"))
+    }
     if not expected:
         print(f"No files found in {args.dist_dir}.")
         return 1

@@ -136,6 +136,26 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
+      # Linking the release binaries can exceed the runner's memory. When that happens
+      # the runner is killed and GitHub reports "The hosted runner lost communication
+      # with the server". Extra swap on the runner's temporary disk prevents it.
+      - name: Add swap space (Linux)
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          set -euo pipefail
+          avail_gb="$(df --output=avail -BG /mnt | tail -n 1 | tr -dc '0-9')"
+          if (( ${avail_gb:-0} < 30 )); then
+            echo "Only ${avail_gb:-0} GB free on /mnt; keeping the default swap."
+          else
+            sudo swapoff -a || true
+            sudo rm -f /mnt/swapfile
+            sudo fallocate -l 16G /mnt/swapfile
+            sudo chmod 600 /mnt/swapfile
+            sudo mkswap /mnt/swapfile
+            sudo swapon /mnt/swapfile
+          fi
+          free -h
+
       # The release scripts need Python 3.11+ (tomllib); macOS runners may default to an older one.
       - name: Setup Python (macOS)
         if: ${{ runner.os == 'macOS' }}
@@ -246,7 +266,8 @@ jobs:
           set -euo pipefail
           STABLE_GIT_COMMIT="$(git rev-parse HEAD)"
           export STABLE_GIT_COMMIT
-          cargo build --target "$TARGET" --release \
+          # Lower priority keeps the runner's own agent responsive during the long link.
+          nice -n 10 cargo build --target "$TARGET" --release \
             --bin codex --bin codex-code-mode-host --bin codex-exec-server
 
       # Lays out bin/codex, its helper binaries, rg and (on Linux) bwrap the way
