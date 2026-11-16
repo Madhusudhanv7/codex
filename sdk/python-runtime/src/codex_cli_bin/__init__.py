@@ -8,11 +8,19 @@ PACKAGE_METADATA_FILENAME = "codex-package.json"
 def bundled_package_dir() -> Path:
     path = Path(__file__).resolve().parent
     metadata_path = path / PACKAGE_METADATA_FILENAME
-    if not metadata_path.is_file():
+    if metadata_path.is_file():
+        # Platform wheel: the runtime ships inside this package.
+        return path
+    try:
+        from ._manifest import MANIFEST
+    except ImportError:
         raise FileNotFoundError(
             f"{PACKAGE_NAME} is installed but missing its package metadata at {metadata_path}"
-        )
-    return path
+        ) from None
+    # Small PyPI wheel: download the matching platform wheel on first use.
+    from ._download import ensure_runtime
+
+    return ensure_runtime(MANIFEST)
 
 
 def bundled_codex_path() -> Path:

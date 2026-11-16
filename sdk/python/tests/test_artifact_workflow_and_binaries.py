@@ -607,7 +607,7 @@ def test_runtime_package_template_has_no_checked_in_binaries() -> None:
         path.name
         for path in runtime_root.rglob("*")
         if path.is_file() and "__pycache__" not in path.parts
-    ) == ["__init__.py"]
+    ) == ["__init__.py", "__main__.py", "_download.py"]
 
 
 def test_examples_readme_points_to_runtime_version_source_of_truth() -> None:
@@ -1024,6 +1024,120 @@ def test_runtime_package_layout_is_included_by_wheel_config(
         "src/codex_cli_bin/codex-resources/**",
         "src/codex_cli_bin/codex-path/**",
     ]
+
+
+def _load_runtime_download_module():
+    """Load the runtime's first-use downloader without installing the package."""
+    path = ROOT.parent / "python-runtime" / "src" / "codex_cli_bin" / "_download.py"
+    spec = importlib.util.spec_from_file_location("codex_cli_bin_download", path)
+    if spec is None or spec.loader is None:
+        raise AssertionError(f"Failed to load runtime download module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _write_fake_platform_wheel(path: Path) -> Path:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("codex_cli_bin/__init__.py", "# python code is not unpacked\n")
+        archive.writestr("codex_cli_bin/codex-package.json", '{"variant":"codex"}\n')
+        binary = zipfile.ZipInfo("codex_cli_bin/bin/codex")
+        binary.external_attr = 0o100755 << 16
+        archive.writestr(binary, "fake codex\n")
+        archive.writestr("codex_cli_bin/codex-path/rg", "fake rg\n")
+        archive.writestr("circle_codex_cli_bin-1.2.3.dist-info/WHEEL", "Wheel-Version: 1.0\n")
+    return path
+
+
+def test_stage_runtime_launcher_writes_download_manifest(tmp_path: Path) -> None:
+    import hashlib
+
+    script = _load_update_script_module()
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    for platform_tag in script.LAUNCHER_PLATFORM_TAGS.values():
+        (wheels / f"circle_codex_cli_bin-1.2.3-py3-none-{platform_tag}.whl").write_text(platform_tag)
+
+    staged = script.stage_python_runtime_launcher(
+        tmp_path / "launcher-stage", "1.2.3", wheels, "https://example.test/release/"
+    )
+
+    pyproject = tomllib.loads((staged / "pyproject.toml").read_text())
+    runpy_manifest: dict = {}
+    exec((staged / "src" / "codex_cli_bin" / "_manifest.py").read_text(), runpy_manifest)
+    manifest = runpy_manifest["MANIFEST"]
+    assert (
+        pyproject["project"]["name"],
+        pyproject["project"]["version"],
+        pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["hooks"]["custom"]["platform-tag"],
+    ) == ("circle-codex-cli-bin", "1.2.3", "any")
+    assert manifest["version"] == "1.2.3"
+    assert manifest["base_url"] == "https://example.test/release"
+    assert set(manifest["files"]) == set(script.LAUNCHER_PLATFORM_TAGS)
+    for key, platform_tag in script.LAUNCHER_PLATFORM_TAGS.items():
+        wheel = wheels / f"circle_codex_cli_bin-1.2.3-py3-none-{platform_tag}.whl"
+        assert manifest["files"][key] == {
+            "filename": wheel.name,
+            "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+            "size": wheel.stat().st_size,
+        }
+
+    next(wheels.glob("*manylinux_2_17_x86_64.whl")).unlink()
+    with pytest.raises(RuntimeError, match="linux-x86_64"):
+        script.stage_python_runtime_launcher(
+            tmp_path / "launcher-stage-2", "1.2.3", wheels, "https://example.test/release"
+        )
+
+
+def test_runtime_launcher_downloads_verifies_and_caches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import hashlib
+
+    download = _load_runtime_download_module()
+    served = tmp_path / "served"
+    served.mkdir()
+    wheel = _write_fake_platform_wheel(served / "runtime.whl")
+    manifest = {
+        "version": "1.2.3",
+        "base_url": served.as_uri(),
+        "files": {
+            "linux-x86_64": {
+                "filename": wheel.name,
+                "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+                "size": wheel.stat().st_size,
+            }
+        },
+    }
+    monkeypatch.setenv(download.CACHE_DIR_ENV, str(tmp_path / "cache"))
+    monkeypatch.delenv(download.BASE_URL_ENV, raising=False)
+    monkeypatch.setattr(download, "platform_key", lambda: "linux-x86_64")
+
+    runtime = download.ensure_runtime(manifest)
+
+    assert runtime == tmp_path / "cache" / "1.2.3" / "linux-x86_64"
+    assert sorted(
+        path.relative_to(runtime).as_posix() for path in runtime.rglob("*") if path.is_file()
+    ) == ["bin/codex", "codex-package.json", "codex-path/rg"]
+    assert (runtime / "bin" / "codex").stat().st_mode & 0o111
+    assert (runtime / "codex-path" / "rg").stat().st_mode & 0o111
+
+    wheel.unlink()
+    assert download.ensure_runtime(manifest) == runtime
+
+    tampered = _write_fake_platform_wheel(served / "runtime.whl")
+    with tampered.open("ab") as handle:
+        handle.write(b"tampered")
+    monkeypatch.setenv(download.CACHE_DIR_ENV, str(tmp_path / "fresh-cache"))
+    with pytest.raises(download.RuntimeDownloadError, match="Checksum mismatch"):
+        download.ensure_runtime(manifest)
+    assert not list((tmp_path / "fresh-cache").rglob("codex"))
+
+    monkeypatch.setattr(download, "platform_key", lambda: "windows-x86_64")
+    with pytest.raises(download.RuntimeDownloadError, match="windows-x86_64"):
+        download.ensure_runtime(manifest)
 
 
 @pytest.fixture

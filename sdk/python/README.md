@@ -18,9 +18,25 @@ Install the SDK:
 pip install circle-codex
 ```
 
-Prebuilt runtime wheels (`circle-codex-cli-bin`) are published for macOS
-(Apple silicon and Intel) and Linux (x86_64 and aarch64, glibc and musl).
-Windows is not supported.
+The SDK runs the Codex CLI through its runtime package, `circle-codex-cli-bin`,
+which pip installs automatically. That package is small: the first time your
+code starts Codex, it downloads the runtime for your platform (about 150-200 MB)
+from the project's GitHub Release, checks its SHA-256 checksum and caches it in
+`~/Library/Caches/circle-codex` (macOS) or `~/.cache/circle-codex` (Linux).
+Later starts use the cached copy.
+
+Supported platforms: macOS (Apple silicon and Intel) and Linux (x86_64 and
+aarch64). Windows is not supported.
+
+To download the runtime ahead of time, for example while building a Docker
+image, run:
+
+```bash
+python -m codex_cli_bin download
+```
+
+Set `CIRCLE_CODEX_CACHE_DIR` to change the cache location, or
+`CIRCLE_CODEX_DOWNLOAD_BASE_URL` to download from a mirror.
 
 The import package keeps the upstream name `openai_codex`, so do not install
 this package into the same environment as the official `openai-codex`.

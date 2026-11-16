@@ -1,12 +1,16 @@
 name: circle-python-release
 
-# Builds this fork's Codex CLI for macOS and Linux, packs it into
-# circle-codex-cli-bin wheels, builds the circle-codex SDK, and (optionally)
-# publishes both to PyPI.
+# Builds this fork's Codex CLI for macOS and Linux and releases it in three places:
+#   - GitHub Release circle-v<version>: one circle-codex-cli-bin wheel per platform
+#     (~150-200 MB each, too large for PyPI's default 100 MB file limit).
+#   - PyPI circle-codex-cli-bin: a tiny wheel listing those platform wheels and their
+#     checksums. It downloads and verifies the right one on first use.
+#   - PyPI circle-codex: the Python SDK, pinned to that exact runtime version.
+# So users only need "circle-codex" in requirements.txt.
 #
 # How to use: Actions tab -> circle-python-release -> Run workflow.
 #   version: the release version for both packages, for example 0.154.0
-#   publish: leave unchecked for a build-only dry run; check it to upload to PyPI
+#   publish: leave unchecked for a build-only dry run; check it to release
 #
 # One-time setup before the first publish:
 #   1. Create a GitHub environment named "pypi" in this repository.
@@ -39,11 +43,10 @@ env:
   RELEASE_VERSION: ${{ inputs.version }}
   RUNTIME_DISTRIBUTION: circle-codex-cli-bin
   SDK_DISTRIBUTION: circle-codex
-  # Largest runtime wheel this workflow accepts, in MB. PyPI's default per-file
-  # limit is 100 MB, projects owned by a PyPI organization get 200 MB, and PyPI
-  # can raise a project's limit on request. Codex runtime wheels are ~150-200 MB,
-  # so keep this in line with the limit your PyPI project actually has.
-  MAX_WHEEL_MB: "200"
+  RELEASE_TAG: circle-v${{ inputs.version }}
+  # Largest platform wheel this workflow accepts, in MB. The platform wheels go to
+  # a GitHub Release, whose files must be under 2 GiB.
+  MAX_WHEEL_MB: "1900"
 
 jobs:
   validate:
@@ -392,19 +395,89 @@ jobs:
           path: dist/sdk/*
           if-no-files-found: error
 
-  # Publishing stays in this top-level workflow: PyPI does not accept reusable
-  # workflows as trusted publishers. The runtime goes first because the SDK
-  # depends on that exact runtime version.
+  # The PyPI copy of circle-codex-cli-bin is this small wheel: it lists the
+  # platform wheels on the GitHub Release and downloads the right one the first
+  # time the SDK needs the Codex binary.
+  build-launcher:
+    name: launcher
+    needs: build-runtime
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python release tools
+        uses: ./.github/actions/setup-python-release-tools
+        with:
+          group: runtime
+
+      - name: Download runtime wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: runtime-wheels-*
+          merge-multiple: true
+          path: dist/runtime
+
+      - name: Build launcher wheel
+        run: |
+          set -euo pipefail
+          stage_dir="${RUNNER_TEMP}/${RUNTIME_DISTRIBUTION}-launcher"
+          python3 sdk/python/scripts/update_sdk_artifacts.py \
+            stage-runtime-launcher \
+            "$stage_dir" \
+            dist/runtime \
+            --codex-version "$RELEASE_VERSION" \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
+          uv build --offline --no-build-isolation --no-create-gitignore \
+            --python "${RUNNER_TEMP}/python-runtime-build-venv" \
+            --wheel \
+            --out-dir dist/launcher \
+            "$stage_dir"
+          ls -lh dist/launcher
+
+      # The GitHub Release does not exist yet, so point the download at the wheels
+      # built by this run to exercise the download, checksum and unpacking path.
+      - name: Test the first-use download
+        run: |
+          set -euo pipefail
+          test_venv="${RUNNER_TEMP}/launcher-test-venv"
+          uv venv --python "${RUNNER_TEMP}/python-runtime-build-venv/bin/python" "$test_venv"
+          uv pip install --python "${test_venv}/bin/python" dist/launcher/*.whl
+          export CIRCLE_CODEX_DOWNLOAD_BASE_URL="file://${GITHUB_WORKSPACE}/dist/runtime"
+          export CIRCLE_CODEX_CACHE_DIR="${RUNNER_TEMP}/circle-codex-cache"
+          codex_path="$("${test_venv}/bin/python" -m codex_cli_bin download)"
+          output="$("$codex_path" --version)"
+          echo "$output"
+          if [[ "$output" != *"$RELEASE_VERSION"* ]]; then
+            echo "Expected version $RELEASE_VERSION from the downloaded binary."
+            exit 1
+          fi
+
+      - name: Upload launcher wheel
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: launcher-wheel
+          path: dist/launcher/*.whl
+          if-no-files-found: error
+
+  # Order matters: the GitHub Release must exist before the PyPI wheel that points
+  # at it, and that wheel before the SDK that depends on it. Publishing stays in
+  # this top-level workflow because PyPI does not trust reusable workflows.
   publish:
-    name: publish to PyPI
+    name: publish
     if: ${{ inputs.publish }}
     needs:
-      - build-runtime
+      - build-launcher
       - build-sdk
     runs-on: ubuntu-24.04
     environment: pypi
     permissions:
-      contents: read
+      contents: write # Create the GitHub Release that hosts the platform wheels.
       id-token: write # Required for PyPI trusted publishing.
     defaults:
       run:
@@ -423,6 +496,12 @@ jobs:
           merge-multiple: true
           path: dist/runtime
 
+      - name: Download launcher wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: launcher-wheel
+          path: dist/launcher
+
       - name: Download Python SDK package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -434,31 +513,84 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           wheels=(dist/runtime/*.whl)
-          if [[ "${#wheels[@]}" -ne 6 ]]; then
-            echo "Expected 6 runtime wheels, found ${#wheels[@]}."
-            exit 1
-          fi
+          launcher=(dist/launcher/*.whl)
           sdk_files=(dist/sdk/*)
-          if [[ "${#sdk_files[@]}" -ne 2 ]]; then
-            echo "Expected an SDK wheel and sdist, found ${#sdk_files[@]} files."
+          if [[ "${#wheels[@]}" -ne 6 || "${#launcher[@]}" -ne 1 || "${#sdk_files[@]}" -ne 2 ]]; then
+            echo "Expected 6 platform wheels, 1 launcher wheel and 2 SDK files;"
+            echo "found ${#wheels[@]}, ${#launcher[@]} and ${#sdk_files[@]}."
             exit 1
           fi
-          ls -lh dist/runtime dist/sdk
+          ls -lh dist/runtime dist/launcher dist/sdk
 
-      - name: Publish runtime wheels to PyPI
+      - name: Create the GitHub Release with the platform wheels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Never replace published files: the PyPI wheel lists their checksums.
+            existing="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+            for wheel in dist/runtime/*.whl; do
+              if ! grep -qxF "$(basename "$wheel")" <<<"$existing"; then
+                gh release upload "$RELEASE_TAG" "$wheel" --repo "$GITHUB_REPOSITORY"
+              fi
+            done
+          else
+            gh release create "$RELEASE_TAG" dist/runtime/*.whl \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "circle-codex $RELEASE_VERSION" \
+              --notes "Codex runtime wheels for circle-codex $RELEASE_VERSION. pip install circle-codex==$RELEASE_VERSION downloads the right one automatically on first use."
+          fi
+
+      - name: Check the released files match this build
+        run: |
+          set -euo pipefail
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
+          for wheel in dist/runtime/*.whl; do
+            name="$(basename "$wheel")"
+            remote="$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "${base}/${name}" | sha256sum | cut -d' ' -f1)"
+            built="$(sha256sum "$wheel" | cut -d' ' -f1)"
+            if [[ "$remote" != "$built" ]]; then
+              echo "${name} on the GitHub Release differs from this build. Release a new version number."
+              exit 1
+            fi
+            echo "${name}: OK"
+          done
+
+      - name: Publish circle-codex-cli-bin to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
-          packages-dir: dist/runtime
+          packages-dir: dist/launcher
           skip-existing: true
 
-      - name: Wait for the runtime wheels on PyPI
-        run: python3 .github/scripts/circle_wait_for_pypi.py "$RUNTIME_DISTRIBUTION" "$RELEASE_VERSION" dist/runtime
+      - name: Wait for circle-codex-cli-bin on PyPI
+        run: python3 .github/scripts/circle_wait_for_pypi.py "$RUNTIME_DISTRIBUTION" "$RELEASE_VERSION" dist/launcher
 
-      - name: Publish Python SDK to PyPI
+      - name: Publish circle-codex to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist/sdk
           skip-existing: true
 
-      - name: Wait for the Python SDK on PyPI
+      - name: Wait for circle-codex on PyPI
         run: python3 .github/scripts/circle_wait_for_pypi.py "$SDK_DISTRIBUTION" "$RELEASE_VERSION" dist/sdk
+
+      - name: Install from PyPI and run the downloaded binary
+        run: |
+          set -euo pipefail
+          test_venv="${RUNNER_TEMP}/pypi-install-test"
+          python3 -m venv "$test_venv"
+          # PyPI's install index can lag behind its JSON API for a few minutes.
+          for attempt in 1 2 3 4 5 6; do
+            if "${test_venv}/bin/pip" install --no-cache-dir "${SDK_DISTRIBUTION}==${RELEASE_VERSION}"; then
+              break
+            fi
+            if [[ "$attempt" -eq 6 ]]; then
+              exit 1
+            fi
+            sleep 30
+          done
+          export CIRCLE_CODEX_CACHE_DIR="${RUNNER_TEMP}/pypi-install-test-cache"
+          codex_path="$("${test_venv}/bin/python" -m codex_cli_bin download)"
+          "$codex_path" --version
