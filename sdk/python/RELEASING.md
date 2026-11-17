@@ -2,15 +2,12 @@
 
 ## This fork: circle-codex
 
-This fork releases from one workflow, `.github/workflows/circle-python-release.yml`:
+This fork publishes two PyPI packages from one workflow,
+`.github/workflows/circle-python-release.yml`:
 
-- GitHub Release `circle-v<version>`: one `circle-codex-cli-bin` platform wheel
-  per platform with the fork's Codex CLI (macOS arm64 and x86_64; Linux x86_64
-  and aarch64, manylinux and musllinux). These are ~150-200 MB, above PyPI's
-  default 100 MB file limit.
-- PyPI `circle-codex-cli-bin`: a small wheel that lists the platform wheels with
-  their checksums and downloads the right one on first use.
-- PyPI `circle-codex`: the pure-Python SDK, pinned to that exact runtime version.
+- `circle-codex-cli-bin`: platform wheels with the fork's Codex CLI
+  (macOS arm64 and x86_64; Linux x86_64 and aarch64, manylinux and musllinux).
+- `circle-codex`: the pure-Python SDK, pinned to that exact runtime version.
 
 To release, open the Actions tab, pick `circle-python-release`, choose
 "Run workflow", and enter a version such as `0.154.0` (0.151.0 or newer). Leave
@@ -26,8 +23,9 @@ accepts only one pending publisher per workflow, so the very first release is
 two steps: register `circle-codex-cli-bin`, run the release (the SDK upload
 fails), register `circle-codex`, then use "Re-run failed jobs".
 
-Never reuse a version number: the PyPI wheel records the checksums of the
-GitHub Release files, and the workflow refuses to replace them.
+The platform wheels are 150-200 MB each, above PyPI's default 100 MB file
+limit, so the `circle-codex-cli-bin` project needs a 200 MB file limit on PyPI.
+The workflow stops before publishing if a wheel is larger than `MAX_WHEEL_MB`.
 
 The sections below describe the upstream OpenAI release process and its
 workflows, which do not run in this fork.

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import argparse
-import hashlib
 import importlib.util
 import json
 import platform
@@ -29,14 +28,6 @@ SDK_DISTRIBUTION_NAME = "circle-codex"
 RUNTIME_DISTRIBUTION_NAME = "circle-codex-cli-bin"
 RUNTIME_PACKAGE_ROOT = Path("src") / "codex_cli_bin"
 CODEX_PACKAGE_METADATA = "codex-package.json"
-# Platform wheel downloaded by the small "launcher" runtime wheel on each platform.
-# The Linux binaries are static (musl), so the manylinux wheel also serves musl distros.
-LAUNCHER_PLATFORM_TAGS = {
-    "darwin-arm64": "macosx_11_0_arm64",
-    "darwin-x86_64": "macosx_10_9_x86_64",
-    "linux-aarch64": "manylinux_2_17_aarch64",
-    "linux-x86_64": "manylinux_2_17_x86_64",
-}
 
 
 def repo_root() -> Path:
@@ -227,47 +218,6 @@ def stage_python_runtime_package(
         _validate_codex_package_layout(runtime_package_root, package_source)
     else:
         _extract_codex_package_archive(package_source, runtime_package_root)
-    return staging_dir
-
-
-def stage_python_runtime_launcher(
-    staging_dir: Path,
-    codex_version: str,
-    wheels_dir: Path,
-    base_url: str,
-) -> Path:
-    """Stage the small, platform-independent runtime wheel published to PyPI.
-
-    It carries no binaries, only a manifest of the platform wheels (hosted at
-    base_url) that the package downloads and verifies on first use.
-    """
-    package_version = normalize_codex_version(codex_version)
-    wheel_stem = f"{RUNTIME_DISTRIBUTION_NAME.replace('-', '_')}-{package_version}-py3-none"
-    files = {}
-    for key, platform_tag in sorted(LAUNCHER_PLATFORM_TAGS.items()):
-        wheel = wheels_dir / f"{wheel_stem}-{platform_tag}.whl"
-        if not wheel.is_file():
-            raise RuntimeError(f"Missing platform wheel for {key}: {wheel}")
-        files[key] = {
-            "filename": wheel.name,
-            "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
-            "size": wheel.stat().st_size,
-        }
-    manifest = {"version": package_version, "base_url": base_url.rstrip("/"), "files": files}
-
-    _copy_package_tree(python_runtime_root(), staging_dir)
-    pyproject_path = staging_dir / "pyproject.toml"
-    pyproject_text = pyproject_path.read_text()
-    pyproject_text = _rewrite_project_name(pyproject_text, RUNTIME_DISTRIBUTION_NAME)
-    pyproject_text = _rewrite_project_version(pyproject_text, package_version)
-    pyproject_text = _rewrite_runtime_platform_tag(pyproject_text, "any")
-    pyproject_path.write_text(pyproject_text)
-
-    manifest_path = staged_runtime_package_root(staging_dir) / "_manifest.py"
-    manifest_path.write_text(
-        '"""Generated at release time: platform wheels to download on first use."""\n\n'
-        f"MANIFEST = {json.dumps(manifest, indent=4, sort_keys=True)}\n"
-    )
     return staging_dir
 
 
@@ -1543,31 +1493,6 @@ def build_parser() -> argparse.ArgumentParser:
             "macosx_11_0_arm64 or manylinux_2_17_x86_64."
         ),
     )
-
-    stage_launcher_parser = subparsers.add_parser(
-        "stage-runtime-launcher",
-        help="Stage the small runtime wheel that downloads its platform wheel on first use",
-    )
-    stage_launcher_parser.add_argument(
-        "staging_dir",
-        type=Path,
-        help="Output directory for the staged launcher package",
-    )
-    stage_launcher_parser.add_argument(
-        "wheels_dir",
-        type=Path,
-        help="Directory containing the built platform wheels to reference",
-    )
-    stage_launcher_parser.add_argument(
-        "--codex-version",
-        required=True,
-        help="Runtime version; must match the platform wheels.",
-    )
-    stage_launcher_parser.add_argument(
-        "--base-url",
-        required=True,
-        help="URL the platform wheels are downloaded from, for example a GitHub Release.",
-    )
     return parser
 
 
@@ -1611,13 +1536,6 @@ def run_command(args: argparse.Namespace, ops: CliOps) -> None:
             normalize_codex_version(args.codex_version),
             args.package_source.resolve(),
             args.platform_tag,
-        )
-    elif args.command == "stage-runtime-launcher":
-        stage_python_runtime_launcher(
-            args.staging_dir,
-            normalize_codex_version(args.codex_version),
-            args.wheels_dir.resolve(),
-            args.base_url,
         )
 
 
